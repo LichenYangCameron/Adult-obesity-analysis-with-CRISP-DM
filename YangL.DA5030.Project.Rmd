@@ -1,0 +1,448 @@
+---
+title: "DA5030 Signature Project"
+author: "Lichen Yang"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Analyzing Dataset with CRISP-DM process
+
+## Instructions:
+
+The signature project provides you with an opportunity to complete a substantial effort where you showcase your understanding of the machine learning and data mining techniques studied in the course. It is an individual project and must be completed without external help although you may consult any resources publicly available as long as you cite them in your R Markdown file.
+
+## Part 1: Business Understanding
+
+Adult obesity has become a worldwide problem that affect both poor and rich. This is especially true for the United States. According to an article from Harvard T.H Chan school of public health, the obesity rate has stayed relatively constant since 2003, but this rate is actually double the amount when compared to the rate in the 1980s. 
+
+The adult obesity has affected the health of the general public tin the United States. Thus this project aims to develop a series of rudimentary models to predict whether an individual is overweight or not based on their life style and traits, and hopefully in the process display what life style choices and traits are more likely to cause an individual to be overweight. 
+
+## Part 2: Data Understanding
+
+```{r loading_data, message=FALSE}
+library(tidyverse)
+library(psych)
+library(klaR)
+library(stringr)
+library(rpart)
+library(rpart.plot)
+library(gmodels)
+library(caret)
+library(irr)
+library(ipred)
+library(kernlab)
+url = "https://drive.google.com/uc?export=download&id=1zBb_Kxywu3t_mC8Tj0JO1GK1y5wi08B2"
+data <- read.csv(url, 
+                 header = T,
+                 stringsAsFactors = F)
+data
+```
+
+```{r data_exploration}
+dim(data)
+summary(data)
+str(data)
+
+```
+
+After loading in the dataset with read.csv and initial inspection, the dataset contains 374 observations and 12 columns that are meaningful for this project. The dataset also does not include any missing values. These includes continuous columns: Age, Sleep Duration, Physical Activity Level, Heart Rate, Blood Pressure, and daily steps. It also include categorical variables: Gender, Occupation, Quality of Sleep (scale: 1-10), Stress Level (scale: 1-10), BMI Category, and Sleep Disorder. For the purpose of this project, I will take a classification approach, as the BMI category column(which we would like to predict) is an categorical variable.
+
+```{r data_understanding}
+pairs.panels(data)
+```
+
+With the help with pairs panel function we can see the distribution of data for each columns, as well as the correlation between each columns. The distribution seems relatively normal for most of the numerical columns, with some slight skewness in some of them. We will normalize these columns later, by removing outliers based on z-score of these observations. 
+In terms of colinearity, a few columns do have colinearity level higher than 60%  
+
+## Part 3: Data Preparation
+
+step 1: Drop the blood pressure column, as it will be too hard to convert this column into categorical variable. It is also goood to drop the ID columns as weel, as it does not have any real attribution to the BMI Category. I will also replace the Normal weight with Normal in BMI.Category column, as the two levels are the same. Finally I will reclassify "Obese" level in BMI.Category column with "Overweight", as tthe obese people are definitely overweight, and to implement Naive bayes and other model we can only have 2 levels for what we are trying to predict.   
+
+```{r dropping_columns}
+
+data <- data[, -c(1, 10)]
+data$BMI.Category <- str_replace(data$BMI.Category, "Normal Weight", "Normal")
+data$BMI.Category <- str_replace(data$BMI.Category, "Obese", "Overweight")
+data$BMI.Category <- as.factor(data$BMI.Category)
+
+```
+
+step 2: Remove the outliers for numerical columns. Since Quality of Sleep (scale: 1-10) and Stress Level (scale: 1-10) are scale columns, I will treat these two columns as categorical columns thus not remove the outliers for these columns. For outliers removal, a numerical entry with absolute z scores larger than 3 will be classified as an outlier, and removed. Finally although there is no missing values in this dataset, we will use na.omit() function as a precaution to remove all na values. 
+
+```{r checking_for_outliers}
+
+# Function to find all absolute z-score in a single column
+zscore <- function(x){
+  return(abs(z_scores <- (x - mean(x, na.rm = T)) / sd(x, na.rm = T)))
+}
+
+# removing outliers for numerical columns based on z-score
+data.no <- data %>% 
+  filter(!zscore(data$Age) > 3) %>%
+  filter(!zscore(data$Sleep.Duration) > 3) %>%
+  filter(!zscore(data$Physical.Activity.Level) > 3) %>%
+  filter(!zscore(data$Daily.Steps) > 3)%>%
+  filter(!zscore(data$Heart.Rate) > 3) 
+
+# removing na
+data.no <- na.omit(data.no)
+```
+
+step 3:
+
+I will transform the numerical columns to categorical columns with binning. Also for Quality of Sleep (scale: 1-10) and Stress Level (scale: 1-10) columns, I will just change them from numerical to string variables. 
+
+```{r transform_columns}
+
+# create a function for binning
+bin_fun <- function(var, bin){
+  breaks <- quantile(var, probs = seq(0, 1, length.out = bin + 1), na.rm = T)
+  cut(var, breaks = breaks, labels = 1:bin, include.lowest = T)
+}
+
+
+# binning with our new function:
+cont_vars <- c("Age", "Sleep.Duration", "Physical.Activity.Level", "Daily.Steps",
+               "Heart.Rate")
+
+bin <- 4
+
+for (var in cont_vars) {
+   data.no[[var]] <- bin_fun(data.no[[var]], bin)
+}
+
+# converting the rest of the categorical variables as factors
+data.no$Gender<- as.factor(data.no$Gender)
+data.no$Occupation <- as.factor(data.no$Occupation)
+data.no$Quality.of.Sleep <- as.factor(data.no$Quality.of.Sleep)
+data.no$Stress.Level <- as.factor(data.no$Stress.Level)
+data.no$Sleep.Disorder <- as.factor(data.no$Sleep.Disorder)
+head(data.no)
+```
+
+## Part 4: Modeling
+
+### train_test_split with holdout method
+
+To start modeling we will start by splitting datasets into train, test and validation sets using a holdout method I will also set a seed so we get same result everytime someone wants to run my code.
+
+```{r Train_test_split}
+set.seed(12345)
+r <-nrow(data.no)
+
+# our data after preparation has 365 observations, we will create random_ids with that in mind
+set.seed(12345)
+random_ids <- order(runif(365))
+
+# now we divide the dataset in train, validation, and test datasets with random id with a rough 50%, 25% and 25% ratio
+
+df.train <- data.no[random_ids[1:183],]
+df.val <- data.no[random_ids[184:274],]
+df.test <- data.no[random_ids[275:365],]
+
+```
+
+### Constructing 3 models
+
+Since we are taking a classification approach, we will use three classification models. Starting with Naive bayes model: 
+
+```{r NaiveBayes}
+set.seed(12345)
+model.nb <- NaiveBayes(BMI.Category ~., data = df.train)
+prediction.nb <- predict(model.nb, df.val) 
+```
+
+We can also use a svm model :
+```{r svm model}
+set.seed(12345)
+model.svm <- ksvm(BMI.Category ~., data = df.train, kernel ="rbfdot")
+prediction.svm <- predict(model.svm, df.val)
+```
+
+Finally, we got the decision tree  
+```{r decision_tree}
+set.seed(12345)
+
+model.dt <- rpart(BMI.Category ~., data = df.train, method = "class")
+
+rpart.plot(model.dt, digits = 4, fallen.leaves = T,
+           type = 3, extra = 101)
+
+prediction.dt <- predict(model.dt, df.val, type = "class")
+```
+
+## Part 5: Evaluation:
+
+### Create confusion matrix to see how models perform
+
+Now with the models created, I can construct the confusion matrix to see how each models are make the prediction with the actual data. 
+
+We start with Naive Bayes confusion matrix:
+
+```{r confusionmatrix_nb}
+CrossTable(prediction.nb$class, df.val$BMI.Category,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('Predicted', 'Actual'))
+```
+
+Confusion matix for svm model:
+
+```{r confusionmatrix_svm}
+CrossTable(prediction.svm, df.val$BMI.Category,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('Predicted', 'Actual'))
+```
+
+confusion matrix for decision tree model:
+
+```{r confusionmatrix_dt}
+CrossTable(prediction.dt, df.val$BMI.Category,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('Predicted', 'Actual'))
+```
+
+### the hold out method
+
+From the three confusion matrix above we can see svm model have the best performance out of the 3, with least false positive and least false negative. Thus to complete the last step of the holdout method we can perform svm model on the test data which was not used up till now, and create a new confusion matrix.  
+
+```{r holdout_method_on_testdata}
+set.seed(12345)
+prediction.f <- predict(model.svm, df.test)
+# confusion matrix:
+CrossTable(prediction.f, df.test$BMI.Category,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('Predicted', 'Actual'))
+
+```
+
+
+### k fold cross validation
+
+Other than the holdout method, we can also run the k fold cross validation for model evaluation. 
+
+```{r K-fold}
+# we create folds first
+RNGversion("3.5.2")
+set.seed(12345)
+folds <- createFolds(data.no$BMI.Category, k = 10)
+```
+
+Now we will run k-fold cross validation and check the result for each one of our models. starting with the naive bayes:
+
+```{r crossvalidation_naivebayes, warning=FALSE}
+set.seed(12345)
+nb_cv <- lapply(folds, function(x){
+  df.train <- data.no[-x,]
+  df.test <- data.no[x,]
+  nbmodel <- NaiveBayes(BMI.Category ~., data = df.train)
+  nb.pred <- predict(nbmodel, df.test)
+  BMI_actual <- df.test$BMI.Category
+  Kappa <- kappa2(data.frame(BMI_actual, nb.pred$class))$value
+  return(Kappa)
+})
+
+mean(unlist(nb_cv))
+```
+
+With a mean kappa score close to 1, the naive bayes model was almost perfect at predicting the dataset. 
+
+Now we can run a cross validation to check the performance of the svm model:
+
+```{r crossvalidation_svm}
+set.seed(12345)
+svm_cv <- lapply(folds, function(x){
+  df.train <- data.no[-x,]
+  df.test <- data.no[x,]
+  model.svm <- ksvm(BMI.Category ~., data = df.train, kernel = "rbfdot")
+  prediction.svm <- predict(model.svm, df.test)
+  BMI_actual <- df.test$BMI.Category
+  Kappa <- kappa2(data.frame(BMI_actual, prediction.svm))$value
+  return(Kappa)
+})
+
+mean(unlist(svm_cv))
+
+```
+
+Similar to the naive bayes model, the k-fold cross validation produced a mean kappa score close to 1, thus we can say that the svm model is almost perfect at prediction the dataset we have  
+
+
+Finally we run a cross validation for the decision tree model:
+
+```{r crossvalidation_decisiontrees}
+set.seed(12345)
+dt_cv <- lapply(folds, function(x){
+  df.train <- data.no[-x,]
+  df.test <- data.no[x,]
+  model.dt <- rpart(BMI.Category ~., data = df.train, method = "class")
+  prediction.dt <- predict(model.dt, df.test, type = "class")
+  BMI_actual <- df.test$BMI.Category
+  Kappa <- kappa2(data.frame(BMI_actual, prediction.dt))$value
+  return(Kappa)
+})
+
+mean(unlist(dt_cv))
+```
+
+With a mean kappa score close to 1, the decision tree model was almost perfect at predicting the dataset.  
+
+### model comparison
+based on the previous kappa score, all three model performed extremely well, with svm performing the best, and naivebayes the second best, and decision tree model the last. 
+
+## Part 6: Improving future performance
+
+To improve the performance of our models we need to start by using ensemble methods. One of the most common practiced ensemble method is called bootstrap aggregating or Bagging for short. we can start this section with bagging.
+
+### Bagging
+
+Bagging generate a number of training datasets from the original data by bootstraping. These datasets are then used to generate a set of models using a single learning algorithm. The prediction of these models are then combined using a system of voting for our classification problem.
+
+We can start bagging our models with decision tree model, as there is a build in function from ipred package mentioned in chapter 11 of the text book. 
+```{r Bagging_decisiontree}
+RNGversion("3.5.2")
+set.seed(12345)
+
+my_bag <- bagging(BMI.Category ~., data = df.train, nbagg = 25)
+
+bag_pred <- predict(my_bag, df.train)
+
+table(bag_pred, df.train$BMI.Category)
+
+```
+From the table of our bagging predictions, we can see that the model performed extremely well(with 1 missed prediction). However, since we want to see how this translate into future performance we will also do a 10 fold cross validation with bagged trees.
+
+```{r 10fold_treebag}
+RNGversion("3.5.2")
+set.seed(12345)
+
+ctrl <- trainControl(method = "cv", number = 10)
+train(BMI.Category ~., data = df.train, method = "treebag", trControl = ctrl)
+```
+
+with a kappa score of 0.8764297, the bagged decision tree model is good, however when compared to the unbagged decision tree model it actually did not improve.
+
+
+now we will attempt to bag our the svm model:
+
+the df.train set is where we will begin our bagging, and each bag should randomly make 60% of the df.train dataset, and we will make 10 different bags.
+
+```{r bagging_svm}
+
+# we will make a matrix that contains 74 rows (since we want 60% data each bags, which is 109 observations, the validation set to make a prediction would contain 183 - 109 = 74 rows), and 10 columns to store each bag
+set.seed(12345)
+svm_matrix <- matrix(NA, nrow = 74, ncol = 10)
+
+for (i in 1:10) {
+  ss <- sample(1:nrow(df.train), floor(0.6 * nrow(df.train)), replace = F)
+  traindata <- df.train[ss,]
+  valdata <- df.train[-ss,]
+  svmmodel <- ksvm(BMI.Category ~., data = traindata, kernel = "rbfdot")
+  svm_matrix[,i] <- predict(svmmodel, valdata)
+}
+
+# now with 10 different bags stored in each columns of the matrix, we can just make our final prediction by choosing the mode of each row.  
+svm_matrix <- as.data.frame(svm_matrix)
+svm_matrix$row_mode <- apply(svm_matrix[], 1,                            function(x){names(which.max(table(factor(x,unique(x)))))})
+
+bagged_prediction.svm <- svm_matrix$row_mode 
+
+CrossTable(bagged_prediction.svm, valdata$BMI.Category,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('Predicted', 'Actual'))
+
+```
+
+as we can see from the confusion matrix above, the bagged svm model has predicted  roughly 64.9% of the val data correctly, but made 12.2% false positive and 23% false negative prediction. Thus the bagged model is not as good as the original svm model.
+
+Now we will attempt to bag the naive bayes model:
+
+```{r bagging_naivebayes, warning=FALSE}
+set.seed(12345)
+nb_matrix <- matrix(NA, nrow = 74, ncol = 10)
+
+for (i in 1:10) {
+  ss <- sample(1:nrow(df.train), floor(0.6 * nrow(df.train)), replace = F)
+  traindata <- df.train[ss,]
+  valdata <- df.train[-ss,]
+  nbmodel <- NaiveBayes(BMI.Category ~., data = traindata)
+  nb_matrix[,i] <- predict(nbmodel, valdata)$class
+}
+
+nb_matrix <- as.data.frame(nb_matrix)
+
+nb_matrix$row_mode <- apply(nb_matrix[], 1,                            function(x){names(which.max(table(factor(x,unique(x)))))})
+
+bagged_prediction.nb <- nb_matrix$row_mode 
+
+CrossTable(bagged_prediction.nb, valdata$BMI.Category,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('Predicted', 'Actual'))
+```
+with similar steps to how we bagged the svm model, we can see that the bagged naive bayes model performed with roughly 66.2% correct prediction and 13.5% false positve and 20.3 % false negative predictions. Overall the bagged model didn't fair better than the original naive bayes model
+
+### Construct a new ensemble model as final improvement to original models
+
+With the result of the bagging functions, I have decided to make a new ensemble model with the original Naivebayes, logistic regression and decision tree model, makes a prediction with each one of them and using a majority vote system to make a final prediction.
+
+```{r creating_ensemble}
+set.seed(12345)
+predict_ensemble <- function(val, train){
+  
+  # Naive bays model by using kla package
+  model_nb <- NaiveBayes(BMI.Category ~., data = train)
+  
+  # prediction with naive bayes
+  p_nb <- predict(model_nb, val)
+  
+  # svm model from kernlab package
+  model_svm <- ksvm(BMI.Category~.,data = train, kernel = "rbfdot")
+  
+  # prediction with svm model
+  p_svm <- predict(model_svm, val) 
+  
+  # prediction with decision tree
+  model_dt <- rpart(BMI.Category ~., data = train, method = "class")
+  p_dt <- predict(model_dt, val, type = "class")
+  
+  # majority voting
+  prediction_data <- cbind(p_nb$class, p_svm, p_dt)
+  prediction_data$row_mode <- apply(prediction_data[], 1,                           function(x){names(which.max(table(factor(x,unique(x)))))})
+  # return the final prediction
+  return(prediction_data$row_mode)
+}
+
+```
+
+### applying new ensemble model by making a prediction
+now we run new model with our original train and validation model and create a confusion matrix to compare with the other models
+
+```{r prediction_with_ensemble}
+set.seed(12345)
+ensemble.pd <- predict_ensemble(df.val, df.train)
+
+CrossTable(ensemble.pd, df.val$BMI.Category,
+           prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE,
+           dnn = c('Predicted', 'Actual'))
+
+```
+
+### Comparing the result of ensemble model to all three original models:
+
+We can have a sense of accuracy of predictions from each confusion matrix we created for each data.
+
+From the confusion matrix for ensemble model we can see that our ensemble model have roughly predicted 98.9% of its data correctly, while makeing roughly 0% false positve and 1.1% false negative predictions.
+
+From the confusion matrix of the naive bayes model we observed a roughly 96.7% accurate prediction, with 0% false positive and 3.3% false negative prediction.
+
+For the svm model we observed a roughly 98.9% accurate prediction, with 0% false positive and 1.1% false negative prediction.
+
+and finally for the decision tree model we have observed that the model have roughly predicted 95.6% of its data correctly, while makeing roughly 2.2% fal positve and 2.2% false negative predictions.
+
+Thus the ensemble model performed better at making prediction model. The svm model just performs the same as the ensemble model. And the ensemble model performs about the better than the decision tree model.
+
+
+
+
+
+
